@@ -153,6 +153,14 @@ ts::Tuner::Tuner(const UString& device_name, bool info_only, Report& report) :
     this->open(device_name, info_only, report);
 }
 
+// I wasn't sure where you would want to put it...
+static bool replace(ts::UString& str, const ts::UString& from, const ts::UString& to) {
+    size_t start_pos = str.find(from);
+    if(start_pos == std::string::npos)
+        return false;
+    str.replace(start_pos, from.length(), to);
+    return true;
+}
 
 //-----------------------------------------------------------------------------
 // Get the list of all existing DVB tuners.
@@ -165,15 +173,26 @@ bool ts::Tuner::GetAllTuners(TunerPtrVector& tuners, Report& report)
 
     // Get list of all DVB adapters
     UStringVector names;
-    ExpandWildcard(names, u"/dev/dvb/adapter*");
+
+    // Android
+    ExpandWildcard(names, u"/dev/dvb*.frontend*");
+    
+    // Linux
+    ExpandWildcard(names, u"/dev/dvb/adapter*/frontend*");
 
     // Open all tuners
     tuners.reserve(names.size());
     bool ok = true;
     for (UStringVector::const_iterator it = names.begin(); it != names.end(); ++it) {
+        UString tuner_name(*it);
+
+        replace(tuner_name, u".frontend", u":"); // Android
+        replace(tuner_name, u"/frontend", u":"); // Linux
+
+        report.debug(u"Process wildcard result '%s'", {tuner_name});
         const size_t index = tuners.size();
         tuners.resize(index + 1);
-        tuners[index] = new Tuner(*it, true, report);
+        tuners[index] = new Tuner(tuner_name, true, report);
         if (!tuners[index]->isOpen()) {
             ok = false;
             tuners[index].clear();
@@ -222,6 +241,16 @@ bool ts::Tuner::open(const UString& device_name, bool info_only, Report& report)
         return false;
     }
 
+    // If not specified, use frontend index for demux
+    if (fcount < 3) {
+        demux_nb = frontend_nb;
+    }
+    
+    // If not specified, use frontend index for dvr    
+    if (fcount < 4) {
+        dvr_nb = frontend_nb;
+    }
+        
     _device_name = fields[0];
     if (dvr_nb != 0) {
         _device_name += UString::Format(u":%d:%d:%d", {frontend_nb, demux_nb, dvr_nb});
@@ -232,10 +261,19 @@ bool ts::Tuner::open(const UString& device_name, bool info_only, Report& report)
     else if (frontend_nb != 0) {
         _device_name += UString::Format(u":%d", {frontend_nb});
     }
-    _frontend_name = fields[0] + UString::Format(u"/frontend%d", {frontend_nb});
-    _demux_name = fields[0] + UString::Format(u"/demux%d", {demux_nb});
-    _dvr_name = fields[0] + UString::Format(u"/dvr%d", {dvr_nb});
 
+    if (!fields[0].contain(u"adapter", ts::CASE_SENSITIVE)) {
+        // Assume Android device naming
+        _frontend_name = fields[0] + UString::Format(u".frontend%d", {frontend_nb});
+        _demux_name = fields[0] + UString::Format(u".demux%d", {demux_nb});
+        _dvr_name = fields[0] + UString::Format(u".dvr%d", {dvr_nb});
+    } else {
+        // Linux device naming
+        _frontend_name = fields[0] + UString::Format(u"/frontend%d", {frontend_nb});
+        _demux_name = fields[0] + UString::Format(u"/demux%d", {demux_nb});
+        _dvr_name = fields[0] + UString::Format(u"/dvr%d", {dvr_nb});
+    }
+    
     // Open DVB adapter frontend. The frontend device is opened in non-blocking mode.
     // All configuration and setup operations are non-blocking anyway.
     // Reading events, however, is a blocking operation.
